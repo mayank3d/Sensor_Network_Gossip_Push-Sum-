@@ -1,0 +1,806 @@
+
+
+/**
+ * @author mayank
+ */
+import scala.math._
+import scala.util.Random
+import akka.actor.Actor
+import akka.actor.Props
+import akka.actor._
+import akka.actor.ActorRef
+import akka.actor.ActorSystem
+
+case class Begin()
+case class Gossip()
+case class InitWorkerNode(id:Int, workerNodeList:List[ActorRef], neighbor:List[Int], listener:ActorRef, rumorRecieveLimit:Int)
+case class InitListener(system:ActorSystem, nodeCount:Int, rumorRecieveLimit:Int, algorithm:String)
+case class GossipRecieved(nodeId:Int, gossipCount:Int)
+case class PushSumAlgo(sum:Double, weight:Double)
+case class PushSumConverged(nodeId:Int)
+
+
+
+object StartObject
+{
+  def main(args : Array[String])
+  {
+     if(args.length != 3)
+    {
+      println("***ERROR***: Please enter correct inputs ")
+      //println("For 3d grids of dimension nxnxn, only enter n as number of nodes. For other topologies enter total nodes ")
+    }
+     else
+    {  
+      var numNodes:Int = args(0).toInt  //first input as number of nodes
+      var topology:String = args(1)    // second input as topology type
+      var algorithm:String = args(2)  //third as algorithm to execute
+      
+      //round-off number of nodes if 3d is selected
+      /*if(topology.equalsIgnoreCase("3d") || topology.equalsIgnoreCase("imp3d"))
+       {
+        numNodes= (numNodes*numNodes*numNodes) ;
+       }*/
+      
+      val system = ActorSystem("GossipSystem")    //get an actorSystem
+      var listener:ActorRef = system.actorOf(Props[Master])  //Master props reference
+      val masterActor = system.actorOf(Props(new GossipMachine(
+        numNodes, topology, algorithm, system, listener)), name = "MasterActor")  // GossipMaster reference
+      masterActor ! Begin       //send message to masterActor
+     }
+  }
+}
+
+//##Class GossipMaster
+
+class GossipMachine(var numNodes:Int, topology:String ,algorithm:String ,system:ActorSystem, listener: ActorRef) extends Actor 
+{
+      val failures = 0
+      val rumorRecieveLimit:Int = 10;
+      var workerNodeList:List[ActorRef] = Nil
+    
+      //function to initialize nodes
+      def createNodes(system:ActorSystem,numNodes:Int) = {
+        var i:Int = 0
+        while(i<numNodes)
+        {
+          workerNodeList ::= system.actorOf(Props[WorkerNode])
+          i += 1
+        }
+      }        
+    
+      //function to start algorithm
+      def startGossip(algorithm:String,numNodes:Int) = {
+        if(algorithm.equalsIgnoreCase("gossip"))
+        {
+          workerNodeList(0) ! Gossip
+        }
+        else
+        {
+          var randomWorkerNode = Random.nextInt(workerNodeList.length)
+          workerNodeList(randomWorkerNode) ! PushSumAlgo(0,1)     
+        }
+      }
+ 
+      
+      //function to Build network topology
+      def buildNetwork(topology:String,listener:ActorRef,numNodesRoot:Double) = {
+      
+      //full network topology
+      if("full".equalsIgnoreCase(topology))
+      {
+          println("Building Full Network Topology...")
+          var i:Int = 0
+          
+          while(i<workerNodeList.length)
+          {
+            var neighbors:List[Int] = Nil
+            var j:Int = 0
+            while(j<workerNodeList.length)
+            {
+              if(j!=i)
+              {
+                neighbors ::= j
+              }
+              j += 1
+            }
+            workerNodeList(i) ! InitWorkerNode(i, workerNodeList, neighbors, listener, rumorRecieveLimit)
+            i += 1
+          }
+          
+           println("Full Network Topology Complete")
+        }
+        
+        //linear topology
+        else if("line".equalsIgnoreCase(topology))
+        {
+          println("Building Line Network Topology...")
+          var i:Int = 0;
+          while(i<workerNodeList.length)
+          {
+            var neighbors:List[Int] = Nil
+            
+            if(i>0) 
+              neighbors ::= (i-1)
+              
+            if(i<workerNodeList.length-1) 
+              neighbors ::= (i+1)
+            
+            workerNodeList(i) ! InitWorkerNode(i, workerNodeList, neighbors, listener, rumorRecieveLimit)
+            
+            i += 1
+          }
+          println("Line Network Topology Complete")
+        }
+
+      
+        //3D topology
+        else if("3D".equalsIgnoreCase(topology))
+        {
+          println("Building 3D Network Topology...")
+          var i:Int = 0
+          while(i<workerNodeList.length)    //for each workerNode in the list
+          {
+               var neighbors:List[Int] = Nil  //set a neighbor list and populate it below
+               var flag =true;
+               var csl:Int = (math.cbrt(workerNodeList.length.toDouble)).toInt
+               var csl2:Int = (csl*csl)
+               var csl3:Int = (csl*csl*csl)
+               
+               //deal with front face
+               if(0<=i && i<csl2)
+               {
+                   flag =false;
+                 //println("#1 i= "+i)
+                   neighbors ::= (i+csl2)    //edge directly inside
+                   
+                   //some middle point on top/bottom, join left-right
+                   if( (0 < i && i< (csl-1)) || ((csl2-csl) < i && i< (csl2-1)))
+                   {//println("#2 i= "+i)
+                      neighbors ::= (i-1)  
+                      neighbors ::= (i+1)  
+                   }
+                   //some middle point on left-right
+                   else if((csl <= i && i< (csl2-csl)) && ( (i%csl == 0) || (((i+1)%csl)==0) ) ) 
+                   {//println("#3 i= "+i)
+                      neighbors ::= (i-csl) 
+                      neighbors ::= (i+csl) 
+                   }
+                   //non-corner point on front face
+                   else
+                   {
+                     if((i%csl !=0) && ((i+1)%csl !=0) )    //to remove corner points
+                     {  // println("#4 i= "+i)
+                      neighbors ::= (i-1)  
+                      neighbors ::= (i+1)  
+                      neighbors ::= (i-csl) 
+                      neighbors ::= (i+csl) 
+                     }
+                   }
+               }  //front face complete
+            
+               //back face start
+               if((csl3-csl2)<=i && i<csl3)
+               {   
+                   flag=false
+                   //println("#5 i= "+i)
+                   neighbors ::= (i-csl2)  
+                   //some middle point on top/bottom, join left-right
+                   if( ((csl3-csl) < i && i< (csl3-1)) || ((csl3-csl2) < i && i< (csl3-csl2+csl-1)) )
+                   {//println("#6 i= "+i)
+                      neighbors ::= (i-1)  
+                      neighbors ::= (i+1)  
+                   }
+                   //some middle point on left-right
+                   else if(((csl3-csl2+csl) <= i && i< (csl3-csl)) && ( (i%csl == 0) || (((i+1)%csl)==0) ) )
+                   {//println("#7 i= "+i)
+                      neighbors ::= (i-csl) 
+                      neighbors ::= (i+csl) 
+                   }
+                   else   //non-corner point on back face
+                   {
+                     if((i%csl !=0) && ((i+1)%csl !=0) )    //to remove corner points
+                     {//println("#8 i= "+i)
+                      neighbors ::= (i-1)  
+                      neighbors ::= (i+1)  
+                      neighbors ::= (i-csl)
+                      neighbors ::= (i+csl)
+                     }
+                   }
+               }//back side complete
+               
+               //top face
+               if((0<=i && i<csl) || (0<=(i%csl2) && (i%csl2)<csl) )
+               {   flag=false 
+                   
+                   neighbors ::= (i+csl)  
+                   //some middle point on front/back, join left-right
+                   if( (0 < i && i< csl-1) || ((csl3-csl2) < i && i< (csl3-csl2+csl-1)))
+                   {
+                      //already taken care in front and back side case
+                   }
+                   //some middle point on left-right on top
+                   else if( ( ((csl-1) < i) && (i< (csl3-csl2)) ) && ((i%csl2==0) || ( (i+1-csl)%csl2==0 )) )
+                   {
+                      neighbors ::= (i-csl2) 
+                      neighbors ::= (i+csl2) 
+                   }
+                   else   //non-corner point on top face
+                   {
+                     if((i%csl !=0) && ((i+1)%csl !=0) )    //to remove corner points
+                     {//println("#12 i= "+i)
+                      neighbors ::= (i-1)  
+                      neighbors ::= (i+1)  
+                      neighbors ::= (i-csl2)
+                      neighbors ::= (i+csl2) 
+                     }
+                   }
+                   
+               }//top face complete
+               
+               //bottom face
+               if( 0 <= ((i+csl)%csl2) && ((i+csl)%csl2) < csl)
+               {  flag = false
+                 //println("#13 i= "+i)
+                   neighbors ::= (i-csl) 
+                   //some middle point on front/back, join left-right
+                   if( (csl2-csl <= i && i< csl2) || ( (csl3-csl) <= i && i< (csl3) ) ) //removed all points from front and back so that only middle points are left in last else
+                   {//println("#14 i= "+i)
+                      //already taken care in front and back side case
+                   }
+                   //some middle point on left-right on top
+                   else if( ((csl2-1) < i && i< (csl3-csl)) && ( (((i+1)%csl2)==0) || (((i+csl)%csl2)==0) ) ) 
+                   {//println("#15 i= "+i)
+                      neighbors ::= (i-csl2) 
+                      neighbors ::= (i+csl2) 
+                   }
+                   else   //non-corner point on bottom face
+                   {
+                     if((i%csl !=0) && ((i+1)%csl !=0) )    //to remove corner points
+                     {//println("#16 i= "+i)
+                      neighbors ::= (i-1) 
+                      neighbors ::= (i+1) 
+                      neighbors ::= (i-csl2) 
+                      neighbors ::= (i+csl2) 
+                     }
+                   }
+               }//bottom face complete
+               
+               //left face
+               if((i%csl)==0)
+               {  flag = false
+                 //println("#17 i= "+i)
+                   neighbors ::= (i+1) 
+                   
+                   if( (i%csl2 == 0) || (((i+csl)%csl2)==0))
+                   {//println("#18 i= "+i)
+                      //top and bottom elements, do nothing
+                   }
+                   else if( (i<csl2-csl) || (i> (csl3-csl2)))
+                   {//println("#19 i= "+i)
+                      //side ways elements, do nothing
+                   }
+                   else   //absolute middle elements
+                   {
+                     if(i!=0 && i!= 2*csl && i!= csl3-csl && i!= csl3-csl2)
+                     {//println("#20 i= "+i)
+                      neighbors ::= (i+csl) 
+                      neighbors ::= (i-csl) 
+                      neighbors ::= (i+csl2)
+                      neighbors ::= (i-csl2)
+                     }
+                   }
+
+                   
+               }//left face complete
+               
+               //right face
+               if(((i+1)%csl) == 0)
+               {   flag = false
+                   
+                   neighbors ::= (i-1) 
+                   
+                   if( (((i+1)%csl2)==0)  || (((i-csl-1)%csl)==0) )
+                   {
+                      //top and bottom elements, do nothing
+                   }
+                   else if((i<csl2) || (i> (csl3-csl2)))
+                   {
+                      //left and right most elements, do nothing
+                   }
+                   else //absolute middle elements
+                   {
+                     if((i+1) != csl && (i+1)!= csl2 && (i+1)!=csl3 && (i+1)!= (csl3-2*csl))
+                     {//println("24 i= "+i)
+                      neighbors ::= (i-csl)                       
+                      neighbors ::= (i+csl) 
+                      neighbors ::= (i-csl2) 
+                      neighbors ::= (i+csl2) 
+                     }
+                    }
+                   
+               }//right face complete  
+              
+               if(flag)
+               {
+                 //in the middle of the grid elements
+                 neighbors ::= (i-1)
+                 neighbors ::= (i+1)
+                 neighbors ::= (i-csl)
+                 neighbors ::= (i+csl)
+                 neighbors ::= (i-csl2)
+                 neighbors ::= (i+csl2)
+                 
+               }
+             //Grid elements #neighbors #assignment #complete 
+             
+            workerNodeList(i) ! InitWorkerNode(i, workerNodeList, neighbors, listener, rumorRecieveLimit)
+            
+            i += 1
+            
+          }
+          println("3D Network Topology Complete")
+          
+        }
+        
+                
+        //imperfect 3D topology
+        else if("imp3D".equalsIgnoreCase(topology))
+        {
+          println("Building imperfect 3D Network Topology...")
+          var i:Int = 0
+          while(i<workerNodeList.length)
+          {
+            var neighbors:List[Int] = Nil
+            var tempList:List[Int] = Nil
+               var flag =true;
+               var csl:Int = (math.cbrt(workerNodeList.length.toDouble)).toInt
+               var csl2:Int = (csl*csl)
+               var csl3:Int = (csl*csl*csl)
+               
+               //deal with front face
+               if(0<=i && i<csl2)
+               {
+                   flag =false;
+                 //println("#1 i= "+i)
+                   neighbors ::= (i+csl2)    //edge directly inside
+                   
+                   //some middle point on top/bottom, join left-right
+                   if( (0 < i && i< (csl-1)) || ((csl2-csl) < i && i< (csl2-1)))
+                   {//println("#2 i= "+i)
+                      neighbors ::= (i-1)  
+                      neighbors ::= (i+1)  
+                   }
+                   //some middle point on left-right
+                   else if((csl <= i && i< (csl2-csl)) && ( (i%csl == 0) || (((i+1)%csl)==0) ) ) 
+                   {//println("#3 i= "+i)
+                      neighbors ::= (i-csl) 
+                      neighbors ::= (i+csl) 
+                   }
+                   //non-corner point on front face
+                   else
+                   {
+                     if((i%csl !=0) && ((i+1)%csl !=0) )    //to remove corner points
+                     {  // println("#4 i= "+i)
+                      neighbors ::= (i-1)  
+                      neighbors ::= (i+1)  
+                      neighbors ::= (i-csl) 
+                      neighbors ::= (i+csl) 
+                     }
+                   }
+               }  //front face complete
+            
+               //back face start
+               if((csl3-csl2)<=i && i<csl3)
+               {   
+                   flag=false
+                   //println("#5 i= "+i)
+                   neighbors ::= (i-csl2)  
+                   //some middle point on top/bottom, join left-right
+                   if( ((csl3-csl) < i && i< (csl3-1)) || ((csl3-csl2) < i && i< (csl3-csl2+csl-1)) )
+                   {//println("#6 i= "+i)
+                      neighbors ::= (i-1)  
+                      neighbors ::= (i+1)  
+                   }
+                   //some middle point on left-right
+                   else if(((csl3-csl2+csl) <= i && i< (csl3-csl)) && ( (i%csl == 0) || (((i+1)%csl)==0) ) )
+                   {//println("#7 i= "+i)
+                      neighbors ::= (i-csl) 
+                      neighbors ::= (i+csl) 
+                   }
+                   else   //non-corner point on back face
+                   {
+                     if((i%csl !=0) && ((i+1)%csl !=0) )    //to remove corner points
+                     {//println("#8 i= "+i)
+                      neighbors ::= (i-1)  
+                      neighbors ::= (i+1)  
+                      neighbors ::= (i-csl)
+                      neighbors ::= (i+csl)
+                     }
+                   }
+               }//back side complete
+               
+               //top face
+               if((0<=i && i<csl) || (0<=(i%csl2) && (i%csl2)<csl) )
+               {   flag=false 
+                   
+                   neighbors ::= (i+csl)  
+                   //some middle point on front/back, join left-right
+                   if( (0 < i && i< csl-1) || ((csl3-csl2) < i && i< (csl3-csl2+csl-1)))
+                   {
+                      //already taken care in front and back side case
+                   }
+                   //some middle point on left-right on top
+                   else if( ( ((csl-1) < i) && (i< (csl3-csl2)) ) && ((i%csl2==0) || ( (i+1-csl)%csl2==0 )) )
+                   {
+                      neighbors ::= (i-csl2) 
+                      neighbors ::= (i+csl2) 
+                   }
+                   else   //non-corner point on top face
+                   {
+                     if((i%csl !=0) && ((i+1)%csl !=0) )    //to remove corner points
+                     {//println("#12 i= "+i)
+                      neighbors ::= (i-1)  
+                      neighbors ::= (i+1)  
+                      neighbors ::= (i-csl2)
+                      neighbors ::= (i+csl2) 
+                     }
+                   }
+                   
+               }//top face complete
+               
+               //bottom face
+               if( 0 <= ((i+csl)%csl2) && ((i+csl)%csl2) < csl)
+               {  flag = false
+                 //println("#13 i= "+i)
+                   neighbors ::= (i-csl) 
+                   //some middle point on front/back, join left-right
+                   if( (csl2-csl <= i && i< csl2) || ( (csl3-csl) <= i && i< (csl3) ) ) //removed all points from front and back so that only middle points are left in last else
+                   {//println("#14 i= "+i)
+                      //already taken care in front and back side case
+                   }
+                   //some middle point on left-right on top
+                   else if( ((csl2-1) < i && i< (csl3-csl)) && ( (((i+1)%csl2)==0) || (((i+csl)%csl2)==0) ) ) 
+                   {//println("#15 i= "+i)
+                      neighbors ::= (i-csl2) 
+                      neighbors ::= (i+csl2) 
+                   }
+                   else   //non-corner point on bottom face
+                   {
+                     if((i%csl !=0) && ((i+1)%csl !=0) )    //to remove corner points
+                     {//println("#16 i= "+i)
+                      neighbors ::= (i-1) 
+                      neighbors ::= (i+1) 
+                      neighbors ::= (i-csl2) 
+                      neighbors ::= (i+csl2) 
+                     }
+                   }
+               }//bottom face complete
+               
+               //left face
+               if((i%csl)==0)
+               {  flag = false
+                 //println("#17 i= "+i)
+                   neighbors ::= (i+1) 
+                   
+                   if( (i%csl2 == 0) || (((i+csl)%csl2)==0))
+                   {//println("#18 i= "+i)
+                      //top and bottom elements, do nothing
+                   }
+                   else if( (i<csl2-csl) || (i> (csl3-csl2)))
+                   {//println("#19 i= "+i)
+                      //side ways elements, do nothing
+                   }
+                   else   //absolute middle elements
+                   {
+                     if(i!=0 && i!= 2*csl && i!= csl3-csl && i!= csl3-csl2)
+                     {//println("#20 i= "+i)
+                      neighbors ::= (i+csl) 
+                      neighbors ::= (i-csl) 
+                      neighbors ::= (i+csl2)
+                      neighbors ::= (i-csl2)
+                     }
+                   }
+
+                   
+               }//left face complete
+               
+               //right face
+               if(((i+1)%csl) == 0)
+               {   flag = false
+                   
+                   neighbors ::= (i-1) 
+                   
+                   if( (((i+1)%csl2)==0)  || (((i-csl-1)%csl)==0) )
+                   {
+                      //top and bottom elements, do nothing
+                   }
+                   else if((i<csl2) || (i> (csl3-csl2)))
+                   {
+                      //left and right most elements, do nothing
+                   }
+                   else //absolute middle elements
+                   {
+                     if((i+1) != csl && (i+1)!= csl2 && (i+1)!=csl3 && (i+1)!= (csl3-2*csl))
+                     {//println("24 i= "+i)
+                      neighbors ::= (i-csl)                       
+                      neighbors ::= (i+csl) 
+                      neighbors ::= (i-csl2) 
+                      neighbors ::= (i+csl2) 
+                     }
+                    }
+                   
+               }//right face complete  
+              
+               if(flag)
+               {
+                 //in the middle of the grid elements
+                 neighbors ::= (i-1)
+                 neighbors ::= (i+1)
+                 neighbors ::= (i-csl)
+                 neighbors ::= (i+csl)
+                 neighbors ::= (i-csl2)
+                 neighbors ::= (i+csl2)
+                 
+               }
+             //Grid elements #neighbors #assignment #complete 
+            
+            
+            //Add random neighbor for imperfect 3d grid
+            var randomInt:Int = -1;
+            randomInt = Random.nextInt(workerNodeList.length) //; println("random int : "+randomInt)
+            
+            neighbors ::= (randomInt)
+            workerNodeList(i) ! InitWorkerNode(i, workerNodeList, neighbors, listener, rumorRecieveLimit)
+            
+            i += 1
+          }
+          println("Imperfect 3D Network Topology Complete")
+        }
+        
+        else
+        {
+          println("***ERROR***: Invalid Network Topology entered. \n Enter one of the following--> full, 3d, line, imp3d ")
+        }
+  
+  }
+  
+  //function receive
+  def receive = {
+    case Begin => {
+      if(topology.equalsIgnoreCase("3D") || topology.equalsIgnoreCase("imp3D"))
+      { 
+         while(math.cbrt(numNodes.toDouble)%1!=0)      //to off-set number of nodes for 3d grid
+         {
+               numNodes+=1
+         }
+      }
+         val numNodesRoot = math.sqrt(numNodes.toDouble);
+         createNodes(system,numNodes)      
+         buildNetwork(topology,listener,numNodesRoot)  
+         listener ! InitListener(system, numNodes, rumorRecieveLimit, algorithm)
+          
+          for(i <- 1 to failures)
+        {
+             val tar = workerNodeList(Random.nextInt(workerNodeList.length))
+             println("stopping")
+             println(tar.path.name)
+             context.stop(tar)
+        }
+          
+          startGossip(algorithm,numNodes)
+    }
+  }
+  
+  
+}
+
+//##case class workerNode
+case class WorkerNode() extends Actor
+{
+  
+    import context._
+    import scala.concurrent.duration._
+
+  
+    var rumorTerminationGossip = 0
+    var rumorTerminationPush = math.pow(10, -10)
+    var nodeId:Int = 0
+    var workerNodeList:List[ActorRef] = Nil
+    var schedulor:akka.actor.Cancellable = _
+    var listener:ActorRef = null
+    var neighbors:List[Int] = Nil
+    var rumorCounter:Int = 0
+    var stabilityCounter:Int = 0;
+    var s:Double = 1
+    var w:Double = 1
+    var tickFlag= 0
+    
+    def receive = {
+    
+        case "tick" => {
+          self!PushSumAlgo(s, w)
+        }
+        
+        case "tickGossip" => {
+          self ! Gossip
+        }
+        
+        case InitWorkerNode(id:Int, allNodes:List[ActorRef], neighborList:List[Int], statActor:ActorRef, rumorRecieveLimit:Int) => {
+          neighbors = neighbors ::: neighborList
+          nodeId = id
+          listener = statActor
+          rumorTerminationGossip = rumorRecieveLimit
+          //println("initialize called for node id :"+id)
+          s = id+1
+          w=1
+          workerNodeList = allNodes
+          
+        }
+        
+        
+        case Gossip => {
+        
+        if(tickFlag != 0 )
+        {
+           schedulor.cancel()
+        }
+        else
+        {
+            tickFlag = 1
+        }
+        schedulor = context.system.scheduler.schedule(500 millis, 1000 millis, self, "tickGossip")
+        
+        
+          if(rumorCounter<rumorTerminationGossip) 
+          {
+            //println("Received ping to id: "+nodeId+" Counter -- "+rumorCounter)
+            rumorCounter += 1;
+            listener ! GossipRecieved(nodeId, rumorCounter)
+          
+            var randomWorkerNode = 0
+            
+            randomWorkerNode = Random.nextInt(neighbors.length)
+            //println("Sending Message From Node: "+nodeId+" to "+neighbors(randomWorkerNode))
+            workerNodeList(neighbors(randomWorkerNode)) ! Gossip
+          }
+        }
+        
+        case PushSumAlgo(sum:Double, weight:Double) => {
+          //println("WorkerNodeID: "+nodeId+"  Receives S/W: "+(sum/weight)+" -- Self s/w: "+(s/w));
+         /* if(tickFlag != 0 ){
+            schedulor.cancel()
+          }else{
+            tickFlag = 1
+          }
+           schedulor = context.system.scheduler.schedule(500 millis, 1000 millis, self, "tick")
+          */
+          rumorCounter += 1;
+          var oldRatio:Double = s/w;
+          s+=sum;
+          w+=weight;
+          s = s/2;
+          w = w/2;
+          var newRatio:Double = s/w;
+        
+        //println("Inside PushSum ---- oldRatio: "+oldRatio+"   --- newRatio: "+newRatio);
+        
+          if(rumorCounter==1 || Math.abs((oldRatio-newRatio))>rumorTerminationPush) 
+          {
+            stabilityCounter=0;
+            
+              //println("From Actor: "+nodeId+"\tSending Message ... Sum: "+s+" Weight: "+w);
+              var randomWorkerNode = Random.nextInt(neighbors.length);
+              workerNodeList(neighbors(randomWorkerNode)) ! PushSumAlgo(s,w)
+            
+          }
+          else
+          {
+            stabilityCounter+=1;
+            if(stabilityCounter>3) 
+            {
+              println("Final Condition For Actor  "+nodeId+", \tRumor Count  "+rumorCounter+", \ts/w Ratio: "+(s/w));
+              listener ! PushSumConverged(nodeId); 
+              self ! PoisonPill
+            }
+             else
+             {
+                //println("From Actor: "+nodeId+" Sending Message ... Sum: "+s+" Weight: "+w);
+                var randomWorkerNode = Random.nextInt(neighbors.length);
+                workerNodeList(neighbors(randomWorkerNode)) ! PushSumAlgo(s,w)
+              }
+           }
+        }
+    }
+    
+    override def postStop()
+    {
+      //println("Post Termination --- For Actor  "+nodeId+" \tRumor Count  "+rumorCounter+" \ts/w: "+(s/w));
+    }
+}
+
+//class Master
+class Master extends Actor
+{
+  //Variable declaration
+    var b:Long = 0;
+    var numNodes:Int = 0;
+    var rumorRecieveLimit:Int = 0;
+    var keeperSys:ActorSystem = null;
+    var shouldWork:Boolean = false;
+    var stableNodeCount:Int = 0;
+    
+    //begin status check
+    b = System.currentTimeMillis
+    println("Start Time: "+b)
+    var statusList:List[GossipRecieved] = Nil
+    var psStatusList:List[PushSumConverged] = Nil
+    
+    
+    //#receive
+      def receive = {
+          case InitListener(sys:ActorSystem, nodeCount:Int, rumorBreakLimit:Int, algorithm:String) => {
+          b = System.currentTimeMillis
+          keeperSys = sys;
+          numNodes = nodeCount;
+          rumorRecieveLimit = rumorBreakLimit;
+          if(algorithm.equalsIgnoreCase("gossip")) shouldWork = true;
+        }
+        
+          case GossipRecieved(id:Int, count:Int) => {
+          var tempStatusList:List[GossipRecieved] = Nil
+          var i:Int = 0
+          
+          while(i<statusList.length)
+          {
+            if(statusList(i).nodeId!=id) tempStatusList ::= statusList(i) 
+            i += 1
+          }
+          
+          statusList = tempStatusList
+          statusList = statusList ::: List(new GossipRecieved(id, count))
+          
+          //println("Status received from WorkerNode"+id+"  count: "+count+ "  StatusListCount : "+statusList.length)
+          val failures =0
+          if((statusList.length.toDouble/(numNodes-failures).toDouble)==1)
+          {
+            keeperSys.shutdown;
+          }
+        }
+        
+        case PushSumConverged(nodeId:Int) => {
+          println("Stability achieved by :"+nodeId+",  stableNodeCount: "+stableNodeCount+",  NumberOfNodes: "+numNodes);
+          keeperSys.shutdown;
+        }
+      }
+  
+    //Function postStop 
+    override def postStop()
+    {
+      //println("***Termination info***")
+      
+          if(shouldWork)
+          {
+              for(r <-0 until rumorRecieveLimit+1)
+              {
+                var count:Int = 0;
+                for(status<-statusList)
+                {
+                    if(status.gossipCount==r) 
+                    count += 1;
+                }
+          
+                if(r==0) 
+                  count = (numNodes - statusList.length)
+                //println("Number of Actor who received Gossip "+r+" times : "+count);
+              }
+              
+              println("Active Nodes: "+statusList.length+" / "+numNodes+" => "+100*(statusList.length.toDouble/numNodes.toDouble)+"%")
+           }
+      
+      println("Time taken in milliseconds: "+ (System.currentTimeMillis-b))
+      
+    }
+    
+}
+
